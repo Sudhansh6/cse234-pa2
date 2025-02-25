@@ -52,6 +52,6 @@ def split_data(
     
     split_x_train = x_train[start_idx:end_idx]
     split_y_train = y_train[start_idx:end_idx]
-    
+
     return split_x_train, split_y_train
     

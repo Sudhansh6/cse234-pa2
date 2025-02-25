@@ -49,10 +49,22 @@ def get_info(
     part_out_dim : int
         The partitioned output dimension for the FC layer.
     """
-    #TODO: Your code here
+    # Calculate model and data parallel indices
     mp_idx = rank % mp_size
-    dp_idx = rank // mp_size 
-    
+    dp_idx = rank // mp_size
+
+    # Create model and data parallel communicators
+    mp_comm = comm.Split(dp_idx, rank)
+    dp_comm = comm.Split(mp_idx, rank)
+
+    # Calculate partitioned dimensions based on layer type
+    if fc_layer == "fc_o":
+        part_in_dim = in_dim // mp_size
+        part_out_dim = out_dim
+    else:  # fc_q, fc_k, fc_v
+        part_in_dim = in_dim
+        part_out_dim = out_dim // mp_size
+
     return mp_idx, dp_idx, mp_comm, dp_comm, part_in_dim, part_out_dim
 
 def naive_collect_forward_input(
@@ -68,8 +80,17 @@ def naive_collect_forward_input(
     After gathering, the full input should have shape:
       (batch_size, seq_length, part_in_dim * mp_size)
     """
-    #TODO: Your code here
-    return collected_x
+     # Get the shape of local input
+    batch_size, seq_length, part_in_dim = x.shape
+
+    # Create buffer to gather all parts (each node contributes x.shape)
+    gathered_x = np.empty((mp_size, batch_size, seq_length, part_in_dim), dtype=x.dtype)
+
+    # Perform Allgather across all model parallel nodes
+    mp_comm.Allgather(x, gathered_x)
+    print("x", x.shape, "gx", gathered_x.shape, batch_size, seq_length, part_in_dim)
+    # Reshape to merge along the last dimension
+    return gathered_x.reshape(batch_size, seq_length, part_in_dim * mp_size)
 
 
 def naive_collect_forward_output(
@@ -85,8 +106,17 @@ def naive_collect_forward_output(
     After gathering, the full output should have shape:
       (batch_size, seq_length, part_out_dim * mp_size)
     """
-    #TODO: Your code here
-    return collected_out
+     # Get the shape of local output
+    batch_size, seq_length, part_out_dim = out.shape
+    print("out", out.shape)
+    # Create buffer to gather all parts
+    gathered_out = np.empty((mp_size, batch_size, seq_length, part_out_dim), dtype=out.dtype)
+
+    # Perform Allgather across all model parallel nodes
+    mp_comm.Allgather(out, gathered_out)
+
+    # Reshape to merge along the last dimension 
+    return gathered_out.reshape(batch_size, seq_length, part_out_dim * mp_size)
 
 def naive_collect_backward_output(
     output_grad: np.ndarray,
