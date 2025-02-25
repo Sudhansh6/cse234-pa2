@@ -74,6 +74,11 @@ class Communicator(object):
           - For the root process: (n-1) receives and (n-1) sends.
         """
         #TODO: Your code here
+        assert src_array.size == dest_array.size
+        src_array_byte = src_array.itemsize * src_array.size
+        self.total_bytes_transferred += src_array_byte * 2 * (self.comm.Get_size() - 1)
+        self.comm.Reduce(src_array, dest_array, op)
+        self.comm.Bcast(dest_array)
 
     def myAlltoall(self, src_array, dest_array):
         """
@@ -91,3 +96,36 @@ class Communicator(object):
         The total data transferred is updated for each pairwise exchange.
         """
         #TODO: Your code here
+        comm = self.comm  # Get MPI communicator
+        rank = comm.Get_rank()  # Get current process rank
+        nprocs = comm.Get_size()  # Get total number of processes
+
+        # Ensure that the arrays can be evenly partitioned among processes.
+        assert src_array.size % nprocs == 0, "src_array size must be divisible by the number of processes"
+        assert dest_array.size % nprocs == 0, "dest_array size must be divisible by the number of processes"
+
+        # Number of elements each process sends and receives
+        seg_size = src_array.size // nprocs
+
+        # Calculate byte size of each segment
+        seg_bytes = src_array.itemsize * seg_size
+
+        # Track total bytes transferred
+        self.total_bytes_transferred += seg_bytes * (nprocs - 1) * 2  # Send + Receive
+
+        # Create buffers for send and receive
+        send_buffer = np.array_split(src_array, nprocs)
+        recv_buffer = np.array_split(dest_array, nprocs)
+
+        for i in range(nprocs):
+            if i == rank:
+                # Direct copy for the local segment
+                np.copyto(recv_buffer[i], send_buffer[i])
+            else:
+                # Exchange segments between processes
+                comm.Sendrecv(sendbuf=send_buffer[i], dest=i, sendtag=0,
+                            recvbuf=recv_buffer[i], source=i, recvtag=0)
+
+        # Merge received segments into `dest_array`
+        np.concatenate(recv_buffer, out=dest_array)
+

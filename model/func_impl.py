@@ -50,6 +50,9 @@ def get_info(
         The partitioned output dimension for the FC layer.
     """
     #TODO: Your code here
+    mp_idx = rank % mp_size
+    dp_idx = rank // mp_size 
+    
     return mp_idx, dp_idx, mp_comm, dp_comm, part_in_dim, part_out_dim
 
 def naive_collect_forward_input(
