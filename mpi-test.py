@@ -39,7 +39,7 @@ if __name__ == "__main__":
     
     if args.test_case == "myallreduce":
 
-        num_runs = 100
+        num_runs = 10000
 
         # Lists to store the execution time for each run
         allreduce_times = []
@@ -178,7 +178,7 @@ if __name__ == "__main__":
     elif args.test_case == "myalltoall":
 
         nprocs = comm.Get_size()
-        num_runs = 100
+        num_runs = 10000
 
         # Lists to store the execution times for each run
         alltoall_times = []

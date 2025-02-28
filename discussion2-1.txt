@@ -1,0 +1,49 @@
+Put discussion here for 2.1
+
+
+We noticed that the variation in running time is highly variable. 
+It depends on many factors such as the system being used (hardware and chip), OS, running processes and other factors. 
+
+For Allreduce on a Macbook, the results varied wildly
+1. Summary over 100 runs:
+All runs produced correct results.
+Average MPI.Allreduce time: 0.002424 seconds
+Average myAllreduce time:   0.000483 seconds
+2. Summary over 100 runs:
+All runs produced correct results.
+Average MPI.Allreduce time: 0.001122 seconds
+Average myAllreduce time:   0.001114 seconds
+
+On 10000 runs, we obtained somewhat consistent results (checked over 10 experiments)
+Summary over 10000 runs:
+All runs produced correct results.
+Average MPI.Allreduce time: 0.000111 seconds
+Average myAllreduce time:   0.000077 seconds
+
+The first observation is that the averages are quite different from 100 runs and 10000 runs. It could be due to the following reasons
+1. Warm-up effects (higher overhead starting the functions)
+2. Different system load conditions 
+3. Caching and memory effects 
+
+Our implementation is faster, this could be due to the following reasons:
+- MPI is a general purpose library improving the average speed for all types of use cases and this is a specific use cases
+- The overhead due to library functions may add up
+
+Similarly, for Alltoall we notice the following results -
+1. Our implementation is within a factor of 1.5 of the MPI.alltoall
+2. MPI.alltoall seems to consistently stay around 0.001 seconds whereas ours fluctuates between 0.0005 and 0.0015
+These results vary a lot for 100 experiments. For 10000 experiments, we get the following:
+
+Summary over 10000 runs:
+All runs produced correct results.
+Average MPI.Alltoall time: 0.000090 seconds
+Average myAlltoall time:   0.000109 seconds
+
+Summary over 10000 runs:
+All runs produced correct results.
+Average MPI.Alltoall time: 0.000144 seconds
+Average myAlltoall time:   0.000184 seconds
+
+As compared to AllReduce, these numbers vary more. The reasons mentioned above compound because
+our implementation has more SendRecv operations as compared to Allreduce which can slow it down. 
+Maybe using Send Recv separately can optimize the speed removing the dependence on the synchronization by MPI for SendRecv
