@@ -75,10 +75,47 @@ class Communicator(object):
         """
         #TODO: Your code here
         assert src_array.size == dest_array.size
-        src_array_byte = src_array.itemsize * src_array.size
-        self.total_bytes_transferred += src_array_byte * 2 * (self.comm.Get_size() - 1)
-        self.comm.Reduce(src_array, dest_array, op)
-        self.comm.Bcast(dest_array)
+
+        rank = self.comm.Get_rank()
+        size = self.comm.Get_size()
+
+        if rank == 0:
+            # For some reason np.copy does not work but np.copyto works!
+            # dest_array = np.copy(src_array) 
+            # Update: We ideally want to update dest_array in place. 
+            # # Using src_array.copy() creates a new object essentially losing the reference to the memory given in the argument
+            # The same applied to the minimum and maxoimum operations below
+            np.copyto(dest_array, src_array)
+
+            for i in range(1, size):
+                recv_array = np.empty_like(src_array)  
+                self.comm.Recv(recv_array, source=i, tag=0)
+                # Update: This is not required according to a Piazza post, and removing these 
+                # total_bytes operations can save some more time. 
+                self.total_bytes_transferred += src_array.nbytes
+
+                if op == MPI.SUM:
+                    dest_array += recv_array
+                elif op == MPI.MIN:
+                    # Again, the commented line does not work but out parameter works!
+                    # dest_array = np.minimum(dest_array, recv_array)
+                    np.minimum(dest_array, recv_array, out=dest_array)
+
+                elif op == MPI.MAX:
+                    np.maximum(dest_array, recv_array, out=dest_array)
+
+            for i in range(1, size):
+                self.comm.Send(dest_array, dest=i, tag = 0)
+                self.total_bytes_transferred += dest_array.nbytes
+
+        else:
+            # Send the array rank i (i != 0) has
+            self.comm.Send(src_array, dest=0, tag=0)
+            self.total_bytes_transferred += src_array.nbytes
+            # Receive the result from rank 0 that is the root
+            self.comm.Recv(dest_array, source=0, tag=0)
+            self.total_bytes_transferred += dest_array.nbytes
+
 
     def myAlltoall(self, src_array, dest_array):
         """
@@ -96,36 +133,23 @@ class Communicator(object):
         The total data transferred is updated for each pairwise exchange.
         """
         #TODO: Your code here
-        comm = self.comm  # Get MPI communicator
-        rank = comm.Get_rank()  # Get current process rank
-        nprocs = comm.Get_size()  # Get total number of processes
+        assert src_array.size == dest_array.size
 
-        # Ensure that the arrays can be evenly partitioned among processes.
-        assert src_array.size % nprocs == 0, "src_array size must be divisible by the number of processes"
-        assert dest_array.size % nprocs == 0, "dest_array size must be divisible by the number of processes"
+        rank = self.comm.Get_rank()
+        size = self.comm.Get_size()
+        segment_size = src_array.size // size  
+        
+        # Each process sends its segment to all other processes
+        for i in range(size):
+            # The jth segment on rank i goes to jth rank
+            send_segment = src_array[i * segment_size: (i + 1) * segment_size]
+            
+            # if i == j, copy to dest
+            if rank == i:
+                np.copyto(dest_array[i * segment_size: (i + 1) * segment_size], send_segment)
 
-        # Number of elements each process sends and receives
-        seg_size = src_array.size // nprocs
-
-        # Calculate byte size of each segment
-        seg_bytes = src_array.itemsize * seg_size
-
-        # Track total bytes transferred
-        self.total_bytes_transferred += seg_bytes * (nprocs - 1) * 2  # Send + Receive
-
-        # Create buffers for send and receive
-        send_buffer = np.array_split(src_array, nprocs)
-        recv_buffer = np.array_split(dest_array, nprocs)
-
-        for i in range(nprocs):
-            if i == rank:
-                # Direct copy for the local segment
-                np.copyto(recv_buffer[i], send_buffer[i])
-            else:
-                # Exchange segments between processes
-                comm.Sendrecv(sendbuf=send_buffer[i], dest=i, sendtag=0,
-                            recvbuf=recv_buffer[i], source=i, recvtag=0)
-
-        # Merge received segments into `dest_array`
-        np.concatenate(recv_buffer, out=dest_array)
-
+            # Exchange segments between rank i and rank j
+            self.comm.Sendrecv(sendbuf=send_segment, dest=i, recvbuf=dest_array[i * segment_size: (i + 1) * segment_size], source=i)
+            
+            # Again, this can be removed to save time
+            self.total_bytes_transferred += send_segment.nbytes + dest_array[i * segment_size: (i + 1) * segment_size].nbytes
