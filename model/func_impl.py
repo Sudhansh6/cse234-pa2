@@ -165,12 +165,16 @@ def naive_collect_backward_output(
     Therefore, we split output_grad along axis=2 into mp_size parts and
     return the part corresponding to mp_group_idx.
     """
-    batch_size, seq_length, out_dim = output_grad.shape
-    part_out_dim = out_dim // mp_size  
+    batch_size, sequence_length, out_dimension = output_grad.shape
 
-    collected_output_grad = output_grad[:, :, mp_group_idx * part_out_dim: (mp_group_idx + 1) * part_out_dim]
+    part_out_dimension = out_dimension // mp_size
 
-    return collected_output_grad
+    start = mp_group_idx * part_out_dimension
+    end = start + part_out_dimension
+
+    collected_output_gradient = output_grad[: , :, start:end].copy()
+
+    return collected_output_gradient
 
 
 
@@ -194,17 +198,20 @@ def naive_collect_backward_x(grad_x: np.ndarray, mp_comm, mp_size: int):
         (batch_size, seq_length, in_dim // mp_size).
     """
 
-    batch_size, seq_length, in_dim = grad_x.shape
-    part_in_dim = in_dim // mp_size  
-
+    batch_size, sequence_length, in_dimension = grad_x.shape
+    part_in_dimension = in_dimension // mp_size
     grad_x = np.ascontiguousarray(grad_x)
 
-    global_grad_x = np.empty_like(grad_x)
-    mp_comm.Allreduce(sendbuf=grad_x, recvbuf=global_grad_x, op=MPI.SUM)
+    collected_grad_x = np.empty((batch_size, sequence_length, part_in_dimension), dtype=grad_x.dtype)
+    send_buffer = np.empty([mp_size, batch_size, sequence_length, part_in_dimension], dtype=grad_x.dtype)
 
-    collected_grad_x = np.empty((batch_size, seq_length, part_in_dim), dtype=grad_x.dtype)
-    scatter_buffer = np.split(global_grad_x, mp_size, axis=2)
+    for i in range(mp_size):
+        start = i * part_in_dimension
+        end = start + part_in_dimension
+        send_buffer[i] = grad_x[:, :, start:end]
+        
 
-    mp_comm.Scatter(sendbuf=np.ascontiguousarray(scatter_buffer), recvbuf=collected_grad_x, root=0)
+    send_buffer = send_buffer.reshape(mp_size*batch_size*sequence_length*part_in_dimension)
+    mp_comm.Reduce_scatter(send_buffer, collected_grad_x, op=MPI.SUM)
 
     return collected_grad_x
