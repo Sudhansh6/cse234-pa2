@@ -43,13 +43,16 @@ def split_data(
     """
 
     data_num = x_train.shape[0]
-    dp_group = rank // mp_size  # Determine DP group index
+    # Based on the description, the dp_group is simply this
+    dp_group = rank // mp_size  
+    # Again, from the description
     chunk_size = data_num // dp_size
     
-    # Slice data for this DP group (same for all MP ranks in group)
+    # Slice data for this dp_group (same for all mp ranks in group)
     start_idx = dp_group * chunk_size
     end_idx = (dp_group + 1) * chunk_size
     
+    # Return 
     split_x_train = x_train[start_idx:end_idx]
     split_y_train = y_train[start_idx:end_idx]
 

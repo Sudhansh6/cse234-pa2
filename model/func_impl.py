@@ -49,13 +49,17 @@ def get_info(
     part_out_dim : int
         The partitioned output dimension for the FC layer.
     """
-    color = rank // mp_size  
-    mp_comm = comm.Split(color=color, key=rank)  
+    # According to the documentation, processes with same color have the same communicator
+    # Key is used to differentiate ranks within a communicator
+    # We can use key=rank%mp_size for mp_comm, but for now we use this
+    mp_comm = comm.Split(color=rank // mp_size, key=rank)  
     dp_comm = comm.Split(color=rank % mp_size, key=rank)  
 
+    # Based on the description
     mp_idx = rank % mp_size
     dp_idx = rank // mp_size
 
+    # According to the code stub, if it's output partition input and otherwise partition output
     if fc_layer == "fc_o":
         part_in_dim = in_dim // mp_size
         part_out_dim = out_dim  
@@ -80,38 +84,36 @@ def naive_collect_forward_input(
       (batch_size, seq_length, part_in_dim * mp_size)
     """
     batch_size, sequence_length, part_in_dimension = x.shape
+    # Always do contiguous, otherwise these don't work
     x = np.ascontiguousarray(x)
     full_in_dimension = part_in_dimension * mp_size
     collected_x = np.zeros((batch_size, sequence_length, full_in_dimension), dtype=x.dtype)
+    rank = mp_comm.Get_rank()
 
-    receive_buffers = []
-    for i in range(mp_size):
-        if i == mp_comm.Get_rank():
-            receive_buffer = x
-        else:
-            receive_buffer = np.empty((batch_size, sequence_length, part_in_dimension), dtype=x.dtype)
+    # Initialize receive buffers
+    receive_buffers = [np.empty((batch_size, sequence_length, part_in_dimension), dtype=x.dtype) for _ in range(mp_size)]
+    receive_buffers[rank] = x  # Use the local data for the current rank
 
-        receive_buffer = np.ascontiguousarray(receive_buffer)
-        receive_buffers.append(receive_buffer)
-     
+    # Perform pairwise Sendrecv to gather data from all ranks
     for i in range(mp_size):
-        if i == mp_comm.Get_rank():
+        if i == rank:
             continue
 
-        if mp_comm.Get_rank() < i:
-            mp_comm.Send(x, dest=i)
-            mp_comm.Recv(receive_buffers[i], source=i)
-        else:
-            mp_comm.Recv(receive_buffers[i], source=i)
-            mp_comm.Send(x, dest=i)
+        # Use Sendrecv to exchange data with rank i
+        # Using the collected_x array here directly would fail
+        # A sliced n-D array (In our case 3D) would not be contiguous
+        # We can use ascontiguousarray as shown in the commented line but it is less efficient
+        mp_comm.Sendrecv(sendbuf=x, dest=i, recvbuf=receive_buffers[i], source=i)
+        # mp_comm.Sendrecv(sendbuf=x, dest=i, recvbuf=np.ascontiguousarray(collected_x[..., i*part_in_dimension: (i + 1)*part_in_dimension]), source=i)
 
+
+    # Assemble the collected data
     for i in range(mp_size):
         start = i * part_in_dimension
         end = start + part_in_dimension
         collected_x[:, :, start:end] = receive_buffers[i]
         
     return collected_x
-
 
 def naive_collect_forward_output(
     out: np.ndarray,
@@ -127,19 +129,17 @@ def naive_collect_forward_output(
       (batch_size, seq_length, part_out_dim * mp_size)
     """
     batch_size, sequence_length, part_out_dimension = out.shape
-    
     out = np.ascontiguousarray(out)
-
     full_out_dimension = part_out_dimension * mp_size
 
     collected_out = np.empty((batch_size, sequence_length, full_out_dimension), dtype=out.dtype)
 
-    rank = mp_comm.Get_rank()
-
+    # Always do a copy to prevent memory linkages
     send_buffer = out.copy()
 
     receive_buffer = np.empty([mp_size, batch_size, sequence_length, part_out_dimension], dtype=out.dtype)
 
+    # This is an alternate way to do these problems. We could've done this for the previous case as well
     mp_comm.Allgather(send_buffer, receive_buffer)
 
     for i in range(mp_size):
@@ -168,6 +168,7 @@ def naive_collect_backward_output(
     batch_size, seq_length, out_dim = output_grad.shape
     part_out_dim = out_dim // mp_size  
 
+    # Simply slicing to get the corresponding gradient
     collected_output_grad = output_grad[:, :, mp_group_idx * part_out_dim: (mp_group_idx + 1) * part_out_dim]
 
     return collected_output_grad
@@ -200,11 +201,14 @@ def naive_collect_backward_x(grad_x: np.ndarray, mp_comm, mp_size: int):
     grad_x = np.ascontiguousarray(grad_x)
 
     global_grad_x = np.empty_like(grad_x)
+
+    # Adding gradients across all models because the output is split for layers other than f_o
     mp_comm.Allreduce(sendbuf=grad_x, recvbuf=global_grad_x, op=MPI.SUM)
 
     collected_grad_x = np.empty((batch_size, seq_length, part_in_dim), dtype=grad_x.dtype)
     scatter_buffer = np.split(global_grad_x, mp_size, axis=2)
 
+    # Update only the corresponding model weights
     mp_comm.Scatter(sendbuf=np.ascontiguousarray(scatter_buffer), recvbuf=collected_grad_x, root=0)
 
     return collected_grad_x

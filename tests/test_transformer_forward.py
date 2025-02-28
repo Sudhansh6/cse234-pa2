@@ -66,7 +66,7 @@ def test_fc_o_naive_mp_forward_x_3d():
 
     # Each process gets its slice along the last axis.
     input_x = global_tensor[:, :, rank * part_size : (rank + 1) * part_size]
-
+    # print("Input_x", input_x, rank, global_tensor)
     input_dict = {
         "input_x": input_x,
         "mp_comm": comm,
