@@ -49,23 +49,22 @@ def get_info(
     part_out_dim : int
         The partitioned output dimension for the FC layer.
     """
-    # Calculate model and data parallel indices
+    color = rank // mp_size  
+    mp_comm = comm.Split(color=color, key=rank)  
+    dp_comm = comm.Split(color=rank % mp_size, key=rank)  
+
     mp_idx = rank % mp_size
     dp_idx = rank // mp_size
 
-    # Create model and data parallel communicators
-    mp_comm = comm.Split(dp_idx, rank)
-    dp_comm = comm.Split(mp_idx, rank)
-
-    # Calculate partitioned dimensions based on layer type
     if fc_layer == "fc_o":
         part_in_dim = in_dim // mp_size
-        part_out_dim = out_dim
-    else:  # fc_q, fc_k, fc_v
+        part_out_dim = out_dim  
+    else:
         part_in_dim = in_dim
-        part_out_dim = out_dim // mp_size
+        part_out_dim = out_dim // mp_size 
 
     return mp_idx, dp_idx, mp_comm, dp_comm, part_in_dim, part_out_dim
+
 
 def naive_collect_forward_input(
     x: np.ndarray,
@@ -80,17 +79,38 @@ def naive_collect_forward_input(
     After gathering, the full input should have shape:
       (batch_size, seq_length, part_in_dim * mp_size)
     """
-     # Get the shape of local input
-    batch_size, seq_length, part_in_dim = x.shape
+    batch_size, sequence_length, part_in_dimension = x.shape
+    x = np.ascontiguousarray(x)
+    full_in_dimension = part_in_dimension * mp_size
+    collected_x = np.zeros((batch_size, sequence_length, full_in_dimension), dtype=x.dtype)
 
-    # Create buffer to gather all parts (each node contributes x.shape)
-    gathered_x = np.empty((mp_size, batch_size, seq_length, part_in_dim), dtype=x.dtype)
+    receive_buffers = []
+    for i in range(mp_size):
+        if i == mp_comm.Get_rank():
+            receive_buffer = x
+        else:
+            receive_buffer = np.empty((batch_size, sequence_length, part_in_dimension), dtype=x.dtype)
 
-    # Perform Allgather across all model parallel nodes
-    mp_comm.Allgather(x, gathered_x)
-    print("x", x.shape, "gx", gathered_x.shape, batch_size, seq_length, part_in_dim)
-    # Reshape to merge along the last dimension
-    return gathered_x.reshape(batch_size, seq_length, part_in_dim * mp_size)
+        receive_buffer = np.ascontiguousarray(receive_buffer)
+        receive_buffers.append(receive_buffer)
+     
+    for i in range(mp_size):
+        if i == mp_comm.Get_rank():
+            continue
+
+        if mp_comm.Get_rank() < i:
+            mp_comm.Send(x, dest=i)
+            mp_comm.Recv(receive_buffers[i], source=i)
+        else:
+            mp_comm.Recv(receive_buffers[i], source=i)
+            mp_comm.Send(x, dest=i)
+
+    for i in range(mp_size):
+        start = i * part_in_dimension
+        end = start + part_in_dimension
+        collected_x[:, :, start:end] = receive_buffers[i]
+        
+    return collected_x
 
 
 def naive_collect_forward_output(
@@ -106,17 +126,30 @@ def naive_collect_forward_output(
     After gathering, the full output should have shape:
       (batch_size, seq_length, part_out_dim * mp_size)
     """
-     # Get the shape of local output
-    batch_size, seq_length, part_out_dim = out.shape
-    print("out", out.shape)
-    # Create buffer to gather all parts
-    gathered_out = np.empty((mp_size, batch_size, seq_length, part_out_dim), dtype=out.dtype)
+    batch_size, sequence_length, part_out_dimension = out.shape
+    
+    out = np.ascontiguousarray(out)
 
-    # Perform Allgather across all model parallel nodes
-    mp_comm.Allgather(out, gathered_out)
+    full_out_dimension = part_out_dimension * mp_size
 
-    # Reshape to merge along the last dimension 
-    return gathered_out.reshape(batch_size, seq_length, part_out_dim * mp_size)
+    collected_out = np.empty((batch_size, sequence_length, full_out_dimension), dtype=out.dtype)
+
+    rank = mp_comm.Get_rank()
+
+    send_buffer = out.copy()
+
+    receive_buffer = np.empty([mp_size, batch_size, sequence_length, part_out_dimension], dtype=out.dtype)
+
+    mp_comm.Allgather(send_buffer, receive_buffer)
+
+    for i in range(mp_size):
+        start = i * part_out_dimension
+        end =start + part_out_dimension
+        collected_out[:, :, start: end] = receive_buffer[i]
+
+    
+    return collected_out
+
 
 def naive_collect_backward_output(
     output_grad: np.ndarray,
@@ -131,56 +164,47 @@ def naive_collect_backward_output(
     and the fully connected layer's weight is partitioned along out_dim.
     Therefore, we split output_grad along axis=2 into mp_size parts and
     return the part corresponding to mp_group_idx.
-    
-    Parameters
-    ----------
-    output_grad : np.ndarray
-        The full output gradient from fc_o with shape 
-        (batch_size, seq_length, out_dim).
-    mp_group_idx : int
-        The current model parallel node's index.
-    mp_size : int
-        The total number of model parallel nodes.
-    
-    Returns
-    -------
-    collected_output_grad : np.ndarray
-        The local output gradient for this MP node with shape 
-        (batch_size, seq_length, out_dim // mp_size).
     """
-    #TODO: Your code here
+    batch_size, seq_length, out_dim = output_grad.shape
+    part_out_dim = out_dim // mp_size  
+
+    collected_output_grad = output_grad[:, :, mp_group_idx * part_out_dim: (mp_group_idx + 1) * part_out_dim]
+
+    return collected_output_grad
 
 
-def naive_collect_backward_x(
-    grad_x: np.ndarray,
-    mp_comm,
-    mp_size: int,
-):
+
+def naive_collect_backward_x(grad_x: np.ndarray, mp_comm, mp_size: int):
     """
-    Use reduce-scatter / all-to-all to combine the contributions for grad_x from all nodes
-    and scatter the reduced result along the input feature dimension.
-    
-    The grad_x tensor (gradient with respect to fc_o's input) has shape
-        (batch_size, seq_length, in_dim),
-    and the fc_o's weight matrix is sharded along the in_dim axis. In the 
-    backward pass, each node computes a local grad_x and then these must be 
-    summed across nodes. Instead of summing the full tensor and then slicing,
-    we perform a reduce-scatter / all-to-all.
-    
+    Perform Reduce-Scatter to sum and distribute grad_x across model parallel nodes.
+
     Parameters
     ----------
     grad_x : np.ndarray
-        The locally computed grad_x for fc_o, of shape 
-        (batch_size, seq_length, in_dim).
-    mp_comm :
-        The model parallel communicator. It is assumed to expose methods such as reduce-scatter / all-to-all.
+        Local gradient with shape (batch_size, seq_length, in_dim).
+    mp_comm : MPI communicator
+        The communicator for model parallel nodes.
     mp_size : int
-        The total number of model parallel nodes.
-    
+        Number of model parallel nodes.
+
     Returns
     -------
     collected_grad_x : np.ndarray
-        The reduced and scattered grad_x with shape 
+        The reduced and distributed grad_x with shape
         (batch_size, seq_length, in_dim // mp_size).
     """
-    #TODO: Your code here
+
+    batch_size, seq_length, in_dim = grad_x.shape
+    part_in_dim = in_dim // mp_size  
+
+    grad_x = np.ascontiguousarray(grad_x)
+
+    global_grad_x = np.empty_like(grad_x)
+    mp_comm.Allreduce(sendbuf=grad_x, recvbuf=global_grad_x, op=MPI.SUM)
+
+    collected_grad_x = np.empty((batch_size, seq_length, part_in_dim), dtype=grad_x.dtype)
+    scatter_buffer = np.split(global_grad_x, mp_size, axis=2)
+
+    mp_comm.Scatter(sendbuf=np.ascontiguousarray(scatter_buffer), recvbuf=collected_grad_x, root=0)
+
+    return collected_grad_x
