@@ -135,21 +135,42 @@ class Communicator(object):
         #TODO: Your code here
         assert src_array.size == dest_array.size
 
-        rank = self.comm.Get_rank()
         size = self.comm.Get_size()
-        segment_size = src_array.size // size  
+        rank = self.comm.Get_rank()
         
-        # Each process sends its segment to all other processes
+        # Calculate segment size
+        segment_size = len(src_array) // size
+        
+        # Requests for non-blocking communication
+        requests = []
+        
+        # Initiate all non-blocking sends and receives
         for i in range(size):
-            # The jth segment on rank i goes to jth rank
-            send_segment = src_array[i * segment_size: (i + 1) * segment_size]
-            
-            # if i == j, copy to dest
-            if rank == i:
-                np.copyto(dest_array[i * segment_size: (i + 1) * segment_size], send_segment)
-
-            # Exchange segments between rank i and rank j
-            self.comm.Sendrecv(sendbuf=send_segment, dest=i, recvbuf=dest_array[i * segment_size: (i + 1) * segment_size], source=i)
-            
-            # Again, this can be removed to save time
-            self.total_bytes_transferred += send_segment.nbytes + dest_array[i * segment_size: (i + 1) * segment_size].nbytes
+            if i != rank:  # Skip self
+                
+                # Calculate offsets
+                send_offset = i * segment_size
+                recv_offset = i * segment_size
+                
+                # Non-blocking send and receive
+                req_send = self.comm.Isend(
+                    src_array[send_offset:send_offset+segment_size], 
+                    dest=i, tag=rank
+                )
+                req_recv = self.comm.Irecv(
+                    dest_array[recv_offset:recv_offset+segment_size], 
+                    source=i, tag=i
+                )
+                
+                requests.append(req_send)
+                requests.append(req_recv)
+        
+        # Handle local copy while communication simultaneously
+        local_offset = rank * segment_size
+        dest_array[local_offset:local_offset+segment_size] = \
+            src_array[local_offset:local_offset+segment_size].copy()
+        
+        # Wait for the communication to complete
+        MPI.Request.Waitall(requests)
+        
+        self.total_bytes_transferred += segment_size * (size - 1) * 2  # Both send and receive
